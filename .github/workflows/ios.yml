@@ -1,0 +1,65 @@
+name: Build iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tìm thư mục dự án
+        run: |
+          for z in *.zip; do
+            if [ -f "$z" ]; then unzip -q -o "$z"; fi
+          done
+          f=$(grep -rl --include=project.yml '^name: RSIScan' . | head -1)
+          if [ -z "$f" ]; then f=$(find . -name project.yml -not -path '*/node_modules/*' | head -1); fi
+          echo "Dùng: $f"
+          echo "DIR=$(dirname "$f")" >> "$GITHUB_ENV"
+          echo "APP=$(grep -m1 '^name:' "$f" | sed 's/name: *//' | tr -d '\r ')" >> "$GITHUB_ENV"
+
+      - name: Cài XcodeGen
+        run: brew install xcodegen
+
+      - name: Tạo project Xcode
+        working-directory: ${{ env.DIR }}
+        run: xcodegen generate
+
+      - name: Build (không ký)
+        working-directory: ${{ env.DIR }}
+        run: |
+          set -o pipefail
+          xcodebuild -project "${{ env.APP }}.xcodeproj" -scheme "${{ env.APP }}" \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log
+
+      - name: In các dòng lỗi (nếu có)
+        if: failure()
+        working-directory: ${{ env.DIR }}
+        run: grep -E "error:" build.log | head -50 || true
+
+      - name: Đóng gói IPA
+        working-directory: ${{ env.DIR }}
+        run: |
+          mkdir Payload
+          cp -R "build/Build/Products/Release-iphoneos/${{ env.APP }}.app" Payload/
+          zip -qry "${{ env.APP }}.ipa" Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-ipa
+          path: ${{ env.DIR }}/${{ env.APP }}.ipa
+
+      - name: Gửi log build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ env.DIR }}/build.log
+          if-no-files-found: ignore
